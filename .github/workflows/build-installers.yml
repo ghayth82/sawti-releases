@@ -1,0 +1,197 @@
+name: Build Sawti installers
+
+# The source code lives in the private repository ghayth82/sawti.
+# This public repository only builds it (free minutes for public repos) and
+# publishes the installers. The secret SAWTI_SOURCE_TOKEN is a read-only token
+# for the private repository; no source code is stored here.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch or tag of the private source to build"
+        required: false
+        default: "main"
+      platforms:
+        description: "Which installers to build (macOS uses 10x more build minutes)"
+        type: choice
+        default: all
+        options: [all, windows, mac]
+
+jobs:
+  # Picks the platforms to build, so a Windows-only build uses no macOS minutes.
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.pick.outputs.matrix }}
+    steps:
+      - id: pick
+        shell: bash
+        run: |
+          WIN='{"name":"windows-x64","os":"windows-latest","target":"x86_64-pc-windows-msvc","args":"--bundles nsis"}'
+          ARM='{"name":"macos-apple-silicon","os":"macos-latest","target":"aarch64-apple-darwin","args":"--target aarch64-apple-darwin --bundles dmg"}'
+          X64='{"name":"macos-intel","os":"macos-latest","target":"x86_64-apple-darwin","args":"--target x86_64-apple-darwin --bundles dmg"}'
+          case "${{ inputs.platforms || 'all' }}" in
+            windows) LIST="$WIN" ;;
+            mac) LIST="$ARM,$X64" ;;
+            *) LIST="$WIN,$ARM,$X64" ;;
+          esac
+          echo "matrix={\"include\":[$LIST]}" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.name }}
+    steps:
+      - name: Enable long paths (Windows)
+        if: runner.os == 'Windows'
+        run: git config --system core.longpaths true
+
+      - uses: actions/checkout@v5
+        with:
+          repository: ghayth82/sawti
+          ref: ${{ inputs.ref || 'main' }}
+          token: ${{ secrets.SAWTI_SOURCE_TOKEN }}
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@v2
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+          key: ${{ matrix.name }}
+
+      - name: Install Vulkan SDK (Windows)
+        if: runner.os == 'Windows'
+        uses: humbletim/install-vulkan-sdk@v1.2
+        with:
+          version: 1.4.309.0
+          cache: true
+
+      - name: Install SPIRV-Headers (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          vcpkg install spirv-headers:x64-windows
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg install spirv-headers failed" }
+          $prefix = "$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows" -replace '\\','/'
+          Add-Content $env:GITHUB_ENV "CMAKE_PREFIX_PATH=$prefix"
+
+      # Bundle the VC++ runtime next to the app so it starts on PCs without
+      # the Microsoft redistributable installed.
+      - name: Locate VC++ runtime (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsRoot = & $vswhere -latest -products * -property installationPath
+          $ver = (Get-Content (Join-Path $vsRoot "VC\Auxiliary\Build\Microsoft.VCRedistVersion.default.txt")).Trim()
+          $archDir = Join-Path $vsRoot "VC\Redist\MSVC\$ver\x64"
+          $crt = Get-ChildItem $archDir -Directory -Filter "Microsoft.VC*.CRT" | Sort-Object Name | Select-Object -Last 1
+          $omp = Get-ChildItem $archDir -Directory -Filter "Microsoft.VC*.OpenMP" | Sort-Object Name | Select-Object -Last 1
+          Add-Content -Path $env:GITHUB_ENV -Value "SAWTI_VC_REDIST_DIRS=$($crt.FullName);$($omp.FullName)"
+
+      # Speaker recognition (sherpa-onnx): link the shared Windows build and
+      # ship its DLLs next to Sawti.exe (resource "sherpa-libs" -> ".").
+      - name: Stage speaker-recognition libraries (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $name = "sherpa-onnx-v2.0.2-win-x64-shared-MT-Release-lib"
+          $url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.2/$name.tar.bz2"
+          $work = Join-Path $env:RUNNER_TEMP "sherpa"
+          New-Item -ItemType Directory -Force $work | Out-Null
+          Invoke-WebRequest $url -OutFile "$work/$name.tar.bz2"
+          tar -xjf "$work/$name.tar.bz2" -C $work
+          $lib = Join-Path $work "$name/lib"
+          $dest = "src-tauri/sherpa-libs"
+          New-Item -ItemType Directory -Force $dest | Out-Null
+          Copy-Item "$lib/*.dll" $dest
+          Get-ChildItem $dest | Format-Table Name, Length
+          Add-Content $env:GITHUB_ENV "SHERPA_ONNX_LIB_DIR=$lib"
+
+      - name: Install frontend packages
+        run: bun install
+
+      - name: Build installer
+        uses: tauri-apps/tauri-action@v0
+        with:
+          args: ${{ matrix.args }}
+
+      # Portable edition: install silently in portable mode, then zip the folder.
+      - name: Make portable zip (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setup = Get-ChildItem src-tauri/target/release/bundle/nsis -Filter *-setup.exe | Select-Object -First 1
+          $dest = Join-Path $env:RUNNER_TEMP "Sawti"
+          $p = Start-Process -FilePath $setup.FullName -ArgumentList '/S','/PORTABLE',"/D=$dest" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "portable install failed: $($p.ExitCode)" }
+          if (-not (Test-Path (Join-Path $dest "portable"))) { throw "portable marker missing" }
+          $zip = $setup.FullName -replace '-setup\.exe$', '-portable.zip'
+          Compress-Archive -Path $dest -DestinationPath $zip -Force
+          Get-Item $zip | Format-List Name, Length
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: Sawti-${{ matrix.name }}
+          path: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/nsis/*-portable.zip
+            src-tauri/target/*/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+
+  # Publish the installers (.exe / .dmg, not zipped) on the Releases page.
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: ghayth82/sawti
+          ref: ${{ inputs.ref || 'main' }}
+          token: ${{ secrets.SAWTI_SOURCE_TOKEN }}
+          persist-credentials: false
+      - name: Read version
+        id: v
+        run: echo "version=$(jq -r .version src-tauri/tauri.conf.json)" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Collect installers
+        run: |
+          mkdir -p out
+          find dist -type f \( -name '*.exe' -o -name '*.dmg' -o -name '*-portable.zip' \) -exec cp {} out/ \;
+          ls -la out
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.v.outputs.version }}
+          name: "صوتي Sawti ${{ steps.v.outputs.version }}"
+          make_latest: true
+          body: |
+            **صوتي (Sawti)** — تحويل الكلام إلى نص دون إنترنت.
+
+            | الملف | النظام |
+            |---|---|
+            | `Sawti_..._x64-setup.exe` | Windows 10 / 11 (تثبيت عادي) |
+            | `Sawti_..._x64-portable.zip` | Windows — نسخة محمولة: فك الضغط وشغّل Sawti.exe، تعمل من فلاشة دون تثبيت |
+            | `Sawti_..._aarch64.dmg` | Mac (Apple M1 وما بعده) |
+            | `Sawti_..._x64.dmg` | Mac (Intel) |
+
+            **Windows:** إذا ظهرت رسالة «Windows protected your PC» اضغط More info ثم Run anyway.
+            **Mac:** بعد النقل إلى Applications نفّذ مرة واحدة في Terminal: `xattr -cr /Applications/Sawti.app`
+
+            © 2026 Ghayth AlMahadin — غيث المحادين
+          files: out/*
