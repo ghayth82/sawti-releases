@@ -175,23 +175,40 @@ jobs:
           mkdir -p out
           find dist -type f \( -name '*.exe' -o -name '*.dmg' -o -name '*-portable.zip' \) -exec cp {} out/ \;
           ls -la out
+      - name: Write release notes
+        run: |
+          v="${{ steps.v.outputs.version }}"
+          {
+            if [ -f "src/content/release-notes/$v.md" ]; then
+              # The app shows this part as "what's new" (between the markers).
+              echo "<!-- sawti-notes -->"
+              sed '1{/^# /d}' "src/content/release-notes/$v.md"
+              echo "<!-- /sawti-notes -->"
+              echo
+              echo "---"
+              echo
+            fi
+            cat <<'TABLE'
+          **صوتي (Sawti)** — تحويل الكلام إلى نص دون إنترنت.
+
+          | الملف | النظام |
+          |---|---|
+          | `Sawti_..._x64-setup.exe` | Windows 10 / 11 (تثبيت عادي، ويحدّث النسخة المثبتة مع الإبقاء على إعداداتك ونماذجك وسجلك) |
+          | `Sawti_..._x64-portable.zip` | Windows — نسخة محمولة: فك الضغط وشغّل Sawti.exe، تعمل من فلاشة دون تثبيت |
+          | `Sawti_..._aarch64.dmg` | Mac (Apple M1 وما بعده) |
+          | `Sawti_..._x64.dmg` | Mac (Intel) |
+
+          **Windows:** إذا ظهرت رسالة «Windows protected your PC» اضغط More info ثم Run anyway.
+          **Mac:** بعد النقل إلى Applications نفّذ مرة واحدة في Terminal: `xattr -cr /Applications/Sawti.app`
+
+          © 2026 Ghayth AlMahadin — غيث المحادين
+          TABLE
+          } | sed 's/^          //' > notes.md
+          cat notes.md
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.v.outputs.version }}
           name: "صوتي Sawti ${{ steps.v.outputs.version }}"
           make_latest: true
-          body: |
-            **صوتي (Sawti)** — تحويل الكلام إلى نص دون إنترنت.
-
-            | الملف | النظام |
-            |---|---|
-            | `Sawti_..._x64-setup.exe` | Windows 10 / 11 (تثبيت عادي) |
-            | `Sawti_..._x64-portable.zip` | Windows — نسخة محمولة: فك الضغط وشغّل Sawti.exe، تعمل من فلاشة دون تثبيت |
-            | `Sawti_..._aarch64.dmg` | Mac (Apple M1 وما بعده) |
-            | `Sawti_..._x64.dmg` | Mac (Intel) |
-
-            **Windows:** إذا ظهرت رسالة «Windows protected your PC» اضغط More info ثم Run anyway.
-            **Mac:** بعد النقل إلى Applications نفّذ مرة واحدة في Terminal: `xattr -cr /Applications/Sawti.app`
-
-            © 2026 Ghayth AlMahadin — غيث المحادين
+          body_path: notes.md
           files: out/*
