@@ -164,9 +164,6 @@ jobs:
           ref: ${{ inputs.ref || 'main' }}
           token: ${{ secrets.SAWTI_SOURCE_TOKEN }}
           persist-credentials: false
-      - name: Read version
-        id: v
-        run: echo "version=$(jq -r .version src-tauri/tauri.conf.json)" >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -175,6 +172,16 @@ jobs:
           mkdir -p out
           find dist -type f \( -name '*.exe' -o -name '*.dmg' -o -name '*-portable.zip' \) -exec cp {} out/ \;
           ls -la out
+      # The version of the installers that were built (not of the source as it
+      # is now: a newer commit may have landed while they were building).
+      - name: Read version
+        id: v
+        run: |
+          v=$(ls out | sed -n 's/^Sawti_\([0-9][0-9.]*\)_.*/\1/p' | sort -u)
+          if [ "$(echo "$v" | wc -l)" -ne 1 ] || [ -z "$v" ]; then
+            echo "Installers of different or unknown versions: $v"; exit 1
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
       - name: Write release notes
         run: |
           v="${{ steps.v.outputs.version }}"
