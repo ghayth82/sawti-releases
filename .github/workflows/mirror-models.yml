@@ -1,16 +1,26 @@
 name: Mirror models to Hugging Face
 
-# Copies every speech model Sawti offers (all languages) to your own Hugging
-# Face account, one parallel job per model, so downloads keep working even if
-# the upstream copies disappear. Safe to re-run: files already copied are skipped.
-# Requires the repository secret HF_TOKEN (a Hugging Face token with "Write" access).
+# Copies every model Sawti downloads (speech models in all languages, the
+# speaker-separation models and the Piper voices) to huggingface.co/GhaythMahadin,
+# which the app tries first. Runs by itself after every installer build, so a
+# model added to Sawti is copied before users need it. Safe to re-run: files
+# already copied are skipped.
+# Secrets: HF_TOKEN (Hugging Face, Write) and SAWTI_SOURCE_TOKEN (read-only
+# token for the private source, only the model lists and the script are read).
 on:
   workflow_dispatch:
     inputs:
       only:
-        description: "Optional: comma-separated model ids (empty = all models)"
+        description: "Optional: comma-separated ids (diarization, piper or model ids; empty = all)"
         required: false
         default: ""
+  workflow_run:
+    workflows: ["Build Sawti installers"]
+    types: [completed]
+
+concurrency:
+  group: mirror-models
+  cancel-in-progress: false
 
 jobs:
   list:
@@ -19,6 +29,15 @@ jobs:
       ids: ${{ steps.ids.outputs.ids }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          repository: ghayth82/sawti
+          token: ${{ secrets.SAWTI_SOURCE_TOKEN }}
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/mirror_to_hf.py
+            src-tauri/src/catalog/catalog.json
+            src-tauri/src/piper_voices.json
+          sparse-checkout-cone-mode: false
       - id: ids
         env:
           ONLY: ${{ inputs.only }}
@@ -26,7 +45,7 @@ jobs:
           if [ -n "$ONLY" ]; then
             ids=$(python3 -c "import json,os;print(json.dumps([s.strip() for s in os.environ['ONLY'].split(',') if s.strip()]))")
           else
-            ids=$(CATALOG=mirror/catalog.json python3 mirror/mirror_to_hf.py --list)
+            ids=$(python3 scripts/mirror_to_hf.py --list)
           fi
           echo "ids=$ids" >> "$GITHUB_OUTPUT"
           echo "$ids"
@@ -45,6 +64,15 @@ jobs:
       - name: Free disk space
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
       - uses: actions/checkout@v5
+        with:
+          repository: ghayth82/sawti
+          token: ${{ secrets.SAWTI_SOURCE_TOKEN }}
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/mirror_to_hf.py
+            src-tauri/src/catalog/catalog.json
+            src-tauri/src/piper_voices.json
+          sparse-checkout-cone-mode: false
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -54,5 +82,4 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_OWNER: GhaythMahadin
           ONLY: ${{ matrix.model }}
-          CATALOG: mirror/catalog.json
-        run: python mirror/mirror_to_hf.py
+        run: python scripts/mirror_to_hf.py
