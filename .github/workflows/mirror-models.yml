@@ -1,0 +1,58 @@
+name: Mirror models to Hugging Face
+
+# Copies every speech model Sawti offers (all languages) to your own Hugging
+# Face account, one parallel job per model, so downloads keep working even if
+# the upstream copies disappear. Safe to re-run: files already copied are skipped.
+# Requires the repository secret HF_TOKEN (a Hugging Face token with "Write" access).
+on:
+  workflow_dispatch:
+    inputs:
+      only:
+        description: "Optional: comma-separated model ids (empty = all models)"
+        required: false
+        default: ""
+
+jobs:
+  list:
+    runs-on: ubuntu-latest
+    outputs:
+      ids: ${{ steps.ids.outputs.ids }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: ids
+        env:
+          ONLY: ${{ inputs.only }}
+        run: |
+          if [ -n "$ONLY" ]; then
+            ids=$(python3 -c "import json,os;print(json.dumps([s.strip() for s in os.environ['ONLY'].split(',') if s.strip()]))")
+          else
+            ids=$(CATALOG=mirror/catalog.json python3 mirror/mirror_to_hf.py --list)
+          fi
+          echo "ids=$ids" >> "$GITHUB_OUTPUT"
+          echo "$ids"
+
+  mirror:
+    needs: list
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        model: ${{ fromJson(needs.list.outputs.ids) }}
+    name: ${{ matrix.model }}
+    steps:
+      - name: Free disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install "huggingface_hub[hf_xet]>=0.30"
+      - name: Copy ${{ matrix.model }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_OWNER: GhaythMahadin
+          ONLY: ${{ matrix.model }}
+          CATALOG: mirror/catalog.json
+        run: python mirror/mirror_to_hf.py
