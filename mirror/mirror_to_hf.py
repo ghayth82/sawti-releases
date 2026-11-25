@@ -65,7 +65,10 @@ def main() -> int:
         return 0
     from huggingface_hub import HfApi, hf_hub_download
 
-    token = os.environ["HF_TOKEN"]
+    token = os.environ.get("HF_TOKEN", "").strip()
+    if not token:
+        print("HF_TOKEN is empty: add it under this repository's Settings > Secrets and variables > Actions.")
+        return 1
     api = HfApi(token=token)
     only = [s for s in os.environ.get("ONLY", "").split(",") if s.strip()]
     failures = []
