@@ -67,6 +67,14 @@ jobs:
           workspaces: "./src-tauri -> target"
           key: ${{ matrix.name }}
 
+      # The cache can bring back sherpa-onnx's download folder without its
+      # .a files, and the build script then trusts the empty folder (macOS
+      # builds failed with "could not find native static library
+      # sherpa-onnx-c-api"). Remove it so the libraries are fetched again.
+      - name: Clear cached sherpa-onnx download (macOS)
+        if: runner.os == 'macOS'
+        run: find src-tauri/target -maxdepth 3 -type d -name sherpa-onnx-prebuilt -prune -exec rm -rf {} + || true
+
       - name: Install Vulkan SDK (Windows)
         if: runner.os == 'Windows'
         uses: humbletim/install-vulkan-sdk@v1.2
